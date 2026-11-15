@@ -66,7 +66,10 @@ export function buildWave(state, wave) {
   state.shards = [];
   state.novas = [];
   state.comet = null;
-  state.launches = spec.launches;
+  // Leftover launches bank into the next wave (plus the clear refund
+  // nextWave added just before this call), capped by the wave's own
+  // allowance: the refund used to be overwritten here, so it did nothing.
+  state.launches = Math.max(spec.launches, state.launches);
   state.waveTime = 0;
   state.combo = 0;
 
@@ -124,7 +127,7 @@ export function buildWave(state, wave) {
     return { x: range(rng, 150, 1130), y: range(rng, 90, 380) };
   }
   for (let i = 0; i < spec.shards; i += 1) {
-    const planet = state.planets.length > 0 && rng() < 0.55
+    const planet = state.planets.length > 0 && rng() < spec.orbitChance
       ? state.planets[Math.floor(rng() * state.planets.length)]
       : null;
     let shard;
@@ -132,7 +135,7 @@ export function buildWave(state, wave) {
       const orbit = planet.radius + range(rng, 55, 110);
       shard = {
         id: i, x: planet.x + orbit, y: planet.y, anchorX: planet.x, anchorY: planet.y,
-        orbit, orbitSpeed: range(rng, 0.25, 0.6) * (rng() < 0.5 ? 1 : -1),
+        orbit, orbitSpeed: range(rng, 0.25, 0.6) * spec.drift * (rng() < 0.5 ? 1 : -1),
         phase: rng() * Math.PI * 2, taken: false, spin: rng() * Math.PI * 2,
       };
     } else {
@@ -141,7 +144,7 @@ export function buildWave(state, wave) {
       shard = {
         id: i, x: spot.x, y: spot.y, anchorX: spot.x, anchorY: spot.y,
         orbit: moving ? range(rng, 26, 60) : 0,
-        orbitSpeed: moving ? range(rng, 0.3, 0.8) : 0,
+        orbitSpeed: moving ? range(rng, 0.3, 0.8) * spec.drift : 0,
         phase: rng() * Math.PI * 2, taken: false, spin: rng() * Math.PI * 2,
       };
     }

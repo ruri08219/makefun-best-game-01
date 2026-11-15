@@ -50,6 +50,7 @@ function startGame() {
   state.shardsCollected = 0;
   state.novasCollected = 0;
   state.wave = 1;
+  autoplayNoShotSince = null;
   input._armed = false;
   buildWave(state, 1);
   state.phase = 'aiming';
@@ -145,14 +146,40 @@ function resolveComet(event) {
   }
 }
 
-// Autoplay: aim at the nearest shard (leading moving ones) and fire, for smoke tests.
-function shardPosAt(shard, time) {
-  if (!shard.orbit) return { x: shard.x, y: shard.y };
-  return {
-    x: shard.anchorX + Math.cos(time * shard.orbitSpeed + shard.phase) * shard.orbit,
-    y: shard.anchorY + Math.sin(time * shard.orbitSpeed + shard.phase) * shard.orbit * 0.6,
+// Simulate one launch against a cloned world and count what it harvests.
+// The greedy planner for autoplay: the same physics as the real flight,
+// including drifting shards, so a shot that scores here scores in the game.
+function simulateShot(vx, vy) {
+  const sim = {
+    planets: state.planets,
+    blackHoles: state.blackHoles,
+    shards: state.shards.map((s) => ({ ...s })),
+    novas: state.novas.map((n) => ({ ...n })),
   };
+  const comet = { x: LAUNCHER.x, y: LAUNCHER.y - 18, vx, vy, trail: [], age: 0 };
+  let shards = 0;
+  let nova = false;
+  let simTime = state.time;
+  const sub = 1 / 240;
+  const maxSteps = Math.round(14 / sub);
+  for (let i = 0; i < maxSteps; i += 1) {
+    // Shards drift slowly: refresh their positions every 10th sub-step.
+    if (i % 10 === 0) {
+      simTime += sub * 10;
+      stepShards(sim, simTime);
+    }
+    const event = stepComet(comet, sim, sub);
+    if (!event) continue;
+    if (event.startsWith('shard:')) { shards += 1; continue; }
+    if (event.startsWith('nova:')) { nova = true; continue; }
+    return { shards, nova, lost: true };
+  }
+  return { shards, nova, lost: true }; // stuck in a slow orbit: a lost comet
 }
+
+// Autoplay only: game time when the planner last found no shot at all.
+// A null value means it is not currently waiting on an orbit to swing around.
+let autoplayNoShotSince = null;
 
 function autoplayStep() {
   if (state.phase === 'title') {
@@ -165,30 +192,46 @@ function autoplayStep() {
     return;
   }
   if (state.phase !== 'aiming') return;
-  // Try every uncollected shard, nearest first; lead moving shards by the
-  // comet's estimated flight time, and pick the first whose preview passes close.
+  // Greedy planner: search an angle x power grid and fire the shot that
+  // harvests the most shards (a nova breaks ties). Aiming AT a shard does
+  // not work: shards orbit planets, so the straight line to one usually
+  // runs straight into the planet. The winning shots slingshot around a
+  // planet, and only a full search finds them.
   const open = state.shards.filter((s) => !s.taken).sort((a, b) => {
     const da = Math.hypot(a.x - LAUNCHER.x, a.y - LAUNCHER.y);
     const db = Math.hypot(b.x - LAUNCHER.x, b.y - LAUNCHER.y);
     return da - db;
   });
-  for (const target of open) {
-    const dist = Math.hypot(target.x - LAUNCHER.x, target.y - LAUNCHER.y);
-    const flight = dist / 520;
-    const aimAt = shardPosAt(target, state.time + flight);
-    input.aimAngle = Math.atan2(aimAt.y - LAUNCHER.y, aimAt.x - LAUNCHER.x);
-    for (const power of [0.75, 0.55, 0.95, 0.4, 0.65]) {
+  let best = null;
+  // Wide, fine grid: the collecting window for a slingshot can be narrow
+  // (a few hundredths of a radian, a tenth of power), and a coarse grid
+  // walks straight past it. Only autoplay pays this cost.
+  for (let angle = -3.1; angle <= -0.1; angle += 0.06) {
+    for (const power of [0.4, 0.55, 0.7, 0.85, 1.0]) {
+      input.aimAngle = angle;
       input.aimPower = power;
       const v = input.launchVelocity();
-      const path = predictPath(LAUNCHER.x, LAUNCHER.y - 18, v.x, v.y, state, 120);
-      const near = path.some((p) => Math.hypot(p.x - aimAt.x, p.y - aimAt.y) < 60);
-      if (near) {
-        launchComet();
-        return;
+      const result = simulateShot(v.x, v.y);
+      const score = result.shards * 10 + (result.nova ? 3 : 0);
+      if (result.shards > 0 && (!best || score > best.score)) {
+        best = { score, angle, power };
       }
     }
   }
-  // No clean line found: fire anyway at the nearest shard so the test progresses.
+  if (best) {
+    autoplayNoShotSince = null;
+    input.aimAngle = best.angle;
+    input.aimPower = best.power;
+    launchComet();
+    return;
+  }
+  // No shot collects anything right now: WAIT. Orbit shards swing around
+  // their planet, so a shard on the far side becomes hittable a few
+  // seconds later — a human waits for it, and so should the test player.
+  // Only after 6 s with no shot at all does it fire blind to progress.
+  if (autoplayNoShotSince === null) autoplayNoShotSince = state.time;
+  if (state.time - autoplayNoShotSince < 6) return;
+  autoplayNoShotSince = null;
   if (open.length > 0) {
     const target = open[0];
     input.aimAngle = Math.atan2(target.y - LAUNCHER.y, target.x - LAUNCHER.x);
@@ -208,6 +251,10 @@ function step(dt) {
     input.updateAim(dt);
     if (autoplay) autoplayStep();
     else if (input.wasPressed(' ') || input.wasPressed('enter')) launchComet();
+  } else if (state.phase === 'waveclear') {
+    // Autoplay must advance past the wave-clear screen too: it used to
+    // only run while aiming, so a cleared wave sat here forever.
+    if (autoplay) autoplayStep();
   } else if (state.phase === 'flying' && state.comet) {
     // Fixed sub-steps keep fast comets from tunnelling through planets.
     const sub = 1 / 240;

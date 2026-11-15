@@ -73,8 +73,12 @@ export function predictPath(startX, startY, vx, vy, world, steps = 90, stepDt = 
     novas: world.novas.map((n) => ({ ...n })),
   };
   const points = [];
+  // Sub-step like the real flight (1/240 s): the 1/60 s preview diverged
+  // from the real path near planets, where gravity is stiff, so aimed
+  // shots that looked good on the dotted line missed or crashed.
+  const sub = stepDt / 4;
   for (let i = 0; i < steps; i += 1) {
-    stepComet(ghost, simWorld, stepDt);
+    for (let k = 0; k < 4; k += 1) stepComet(ghost, simWorld, sub);
     if (i % 3 === 0) points.push({ x: ghost.x, y: ghost.y });
     if (ghost.x < -40 || ghost.x > 1320 || ghost.y < -40 || ghost.y > 760) break;
     // Stop the preview at the first impact.
